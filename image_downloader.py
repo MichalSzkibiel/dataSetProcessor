@@ -1,11 +1,7 @@
-from datetime import datetime
 import requests as r
 from tqdm import tqdm
-from oauthlib.oauth2 import BackendApplicationClient
-from requests_oauthlib import OAuth2Session
 
-from config import copernicus_config
-from bbox import Bbox
+from config import copernicus_token_data
 
 
 def find_images(system, instrument_short_name, start_date, end_date, bbox, products, cloud_cover):
@@ -37,6 +33,7 @@ def find_images(system, instrument_short_name, start_date, end_date, bbox, produ
         "$skip": "0"
     }
     g = r.get(url, params=params)
+    print(g.url)
     return g.json()
 
 
@@ -50,46 +47,24 @@ def find_sentinel2(start_date, end_date, bbox, products=('L1C', 'L2A', 'L2AP'), 
     return find_images('S2', 'MSI', start_date, end_date, bbox, products, cloud_cover)
 
 
-def get_oauth_session():
-    print(copernicus_config.client_id[0])
-    print(copernicus_config.client_secret)
-    client = BackendApplicationClient(client_id=copernicus_config.client_id[0])
-    oauth = OAuth2Session(client=client)
-
-    token = oauth.fetch_token(
-        token_url='https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token',
-        client_secret=copernicus_config.client_secret
-    )
-    return token
+def get_token():
+    token = r.post(
+        'https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token',
+        data=copernicus_token_data
+    ).json()
+    return token["access_token"]
 
 
 # Download Copernicus image
 # identifier type str is an identifier of image
 def download_image(identifier):
-    url = f"https://zipper.dataspace.copernicus.eu/odata/v1/Products({identifier})/$value"
-    print(url)
-    token = get_oauth_session()
-    session = r.Session()
-    session.headers.update({'Authorization': f'Bearer {token}'})
-    with session.get(url) as g:
+    token = get_token()
+    url = f'https://zipper.creodias.eu/download/{identifier}?token={token}'
+    print(f'downloading: {identifier}')
+    with r.get(url, stream=True, timeout=100) as g:
         with tqdm(unit="B", unit_scale=True, disable=False) as progress:
-            with open(f"images/{identifier}", 'wb') as f:
+            with open(f"images/{identifier}.zip", 'wb') as f:
                 for chunk in g.iter_content(chunk_size=2**20):
                     if chunk:
                         f.write(chunk),
                         progress.update(len(chunk))
-
-
-images = find_sentinel2(
-    datetime(2023, 9, 16, 0, 0, 0),
-    datetime(2023, 10, 16, 23, 59, 59),
-    Bbox(
-        52.116097999238534,
-        20.732102394104004,
-        52.12079094588992,
-        20.744298934936527
-    ),
-    products=['L2A']
-)
-print([el['Id'] for el in images['value']])
-download_image(images['value'][2]['Id'])
