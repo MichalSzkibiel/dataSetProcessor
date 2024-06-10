@@ -5,7 +5,6 @@ from bbox import Bbox
 from shapely import wkt
 from shapely.ops import unary_union
 import sys
-from matplotlib import pyplot as plt
 
 
 def key_value(key, value):
@@ -16,7 +15,7 @@ def key_value(key, value):
 
 
 # Download from osm, parameters:
-# bbox type Bbox8
+# bbox type Bbox
 # tags type dict collecting key-value data for query
 def osm_data(bbox, tags=None):
     if tags is None:
@@ -31,7 +30,7 @@ def osm_data(bbox, tags=None):
         objects[-1]["id"] = el["id"]
         objects[-1]["geometry"] = osm_geom_proc(el)
     df = pd.DataFrame.from_records(objects)
-    return gpd.GeoDataFrame(df, geometry=gpd.GeoSeries(df["geometry"]))
+    return gpd.GeoDataFrame(df, geometry=gpd.GeoSeries(df["geometry"]), crs=4326)
 
 
 def coord_series(geometry):
@@ -62,19 +61,24 @@ def get_rings(ways):
             else:
                 rings = [geometry]
                 while not compare_nodes(rings[0][0], rings[-1][-1]):
-                    for j in range(i, len(ways)):
+                    found_next = False
+                    for j in range(i + 1, len(ways)):
                         if j not in used:
-                            geometry = ways[i]['geometry']
+                            geometry = ways[j]['geometry']
                             if compare_nodes(rings[-1][-1], geometry[0]):
                                 used.add(j)
                                 rings.append(geometry)
+                                found_next = True
                                 continue
                             elif compare_nodes(rings[-1][-1], geometry[-1]):
                                 used.add(j)
                                 rings.append(geometry[::-1])
+                                found_next = True
                                 continue
-                    print("Invalid multipolygon!")
-                    sys.exit(1)
+                    if not found_next:
+                        print(ways)
+                        print("Invalid multipolygon!")
+                        sys.exit(1)
                 geoms.append(wkt.loads(f"POLYGON(({','.join(coord_series(way) for way in rings)}))"))
     return geoms
 
@@ -93,12 +97,25 @@ def osm_geom_proc(el):
     return osm_geom_funcs[el["type"]](el[osm_geom_source[el["type"]]])
 
 
-"""gdf = osm_data(
-    Bbox(
-        52.116097999238534,
-        20.732102394104004,
-        52.12079094588992,
-        20.744298934936527
-    ),
-    {"landuse": ""}
-)"""
+def parcel_labeler():
+    parcels = gpd.read_file("C:/Users/trole/Documents/Łódź/dzialki.shp")
+    bbox = Bbox(
+        parcels.total_bounds[1],
+        parcels.total_bounds[0],
+        parcels.total_bounds[3],
+        parcels.total_bounds[2],
+        crs="EPSG:2180"
+    ).to_crs("EPSG:4326")
+    print(bbox.format_osm())
+    buildings = osm_data(bbox, tags={"building": ""}).to_crs(epsg=2180)
+    print(buildings)
+    # buildings.to_file("C:/Users/trole/Documents/Łódź/budynkiOSM.shp")
+    parcels['label'] = 0
+    for i, parcel in parcels.iterrows():
+        if i % 1000 == 0:
+            print(f"{i/len(parcels) * 100}%")
+        for j, building in buildings.iterrows():
+            if parcel.geometry.intersects(building.geometry):
+                parcels.loc[i, 'label'] = 1
+                break
+    parcels.to_file("C:/Users/trole/Documents/Łódź/dzialkiLabeled.shp")
