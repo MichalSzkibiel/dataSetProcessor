@@ -425,7 +425,7 @@ def confusion_matrix(labels, predictions, doc):
 
 
 class Model:
-    def __init__(self, name, classifier, normalize=True, pca_decomposition=True, pca_explained=0.99):
+    def __init__(self, name, classifier, normalize=False, pca_decomposition=False, pca_explained=0.99):
         self.name = name
         self.classifier = classifier
         self.fitted_model = None
@@ -622,10 +622,26 @@ class Model:
                     features.shape[1] * features.shape[2]
                 )).transpose()
         if self.normalize:
-            features = self.normalizer.transform(features)
+            if self.is_conv:
+                features = self.normalizer.transform(
+                    features.reshape(
+                        features.shape[0] * features.shape[1] * features.shape[2],
+                        features.shape[-1]
+                    )
+                ).reshape(
+                    features.shape[0],
+                    features.shape[1],
+                    features.shape[2],
+                    features.shape[-1]
+                )
+            else:
+                features = self.normalizer.transform(features)
             if self.pca_decomposition:
                 features = self.pca.transform(features)[:, :self.pca_components]
-        predictions = self.fitted_model.predict(features).reshape(original_shape[0], original_shape[1])
+        predictions = self.fitted_model.predict(features)
+        if len(predictions.shape) > 1:
+            predictions = predictions.argmax(axis=1)
+        predictions = predictions.reshape(original_shape[0], original_shape[1])
         if isinstance(apply_cloud_mask, list):
             with rasterio.open(
                 os.path.join(
