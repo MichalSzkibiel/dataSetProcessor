@@ -87,8 +87,9 @@ english = {
 
 language = english
 
-if not os.path.exists(workspace):
-    os.mkdir(workspace)
+def create_workspace():
+    if not os.path.exists(workspace):
+        os.mkdir(workspace)
     for el in [
         "classImages",
         "cloud_masks",
