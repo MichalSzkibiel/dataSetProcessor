@@ -28,6 +28,8 @@ from config import language, workspace
 from dataset import load_dataset, RasterDataset
 from report_tools import insert_table, insert_param_to_table, percent_format
 from image import Sentinel2Image, load_image
+from multiprocessing import Process as Thread, Pool
+import multiprocessing
 
 
 def random_forest(
@@ -120,7 +122,7 @@ def neural_network(
         architecture,
         table,
         output_activation='softmax',
-        optimizer=keras.optimizers.RMSprop(learning_rate=10**-9),
+        optimizer=keras.optimizers.RMSprop(learning_rate=10 ** -9),
         loss='categorical_crossentropy',
         batch_size=32,
         epochs=10,
@@ -291,16 +293,16 @@ def conv7(
 
 
 def spp_conv(
-    train_features,
-    train_labels,
-    test_features,
-    table,
-    output_activation='softmax',
-    optimizer='rmsprop',
-    loss='categorical_crossentropy',
-    batch_size=32,
-    epochs=10,
-    loss_diff=1e-5
+        train_features,
+        train_labels,
+        test_features,
+        table,
+        output_activation='softmax',
+        optimizer='rmsprop',
+        loss='categorical_crossentropy',
+        batch_size=32,
+        epochs=10,
+        loss_diff=1e-5
 ):
     num_classes = len(set(train_labels))
     train_features_by_size = {}
@@ -363,7 +365,7 @@ def spp_conv(
         prediction = np.array(prediction)
         prediction = prediction[:, 0] > prediction[:, 1]
         answers = np.array(answers)[:, 0]
-        loss = np.sum(prediction == answers)/prediction.shape[0]
+        loss = np.sum(prediction == answers) / prediction.shape[0]
     predictions = []
     for path in test_features:
         with rasterio.open(path) as image:
@@ -422,6 +424,33 @@ def confusion_matrix(labels, predictions, doc):
     row_cells[-1].text = f"{language['kappa']}: {percent_format(kappa)}"
 
     return accuracy, kappa
+
+
+def get_predictions(model, features):
+    if model.normalize:
+        if model.is_conv:
+            features = model.normalizer.transform(
+                features.reshape(
+                    features.shape[0] * features.shape[1] * features.shape[2],
+                    features.shape[-1]
+                )
+            ).reshape(
+                features.shape[0],
+                features.shape[1],
+                features.shape[2],
+                features.shape[-1]
+            )
+        else:
+            features = model.normalizer.transform(features)
+        if model.pca_decomposition:
+            features = model.pca.transform(features)[:, :model.pca_components]
+    try:
+        predictions = model.fitted_model.predict(features)
+    except:
+        predictions = np.zeros(features.shape[0], dtype=np.uint8)
+    if len(predictions.shape) > 1:
+        predictions = predictions.argmax(axis=1)
+    return predictions
 
 
 class Model:
@@ -540,7 +569,8 @@ class Model:
             output_file,
             bbox,
             apply_cloud_mask=None,
-            invalid_value=255
+            invalid_value=255,
+            parallelize=False
     ):
         image = load_image(image_name)
         image.unzip()
@@ -583,7 +613,7 @@ class Model:
             )
         original_shape = (features.shape[1], features.shape[2])
         if self.window_size == 0:
-            features = features.reshape(features.shape[0], features.shape[1]*features.shape[2]).transpose()
+            features = features.reshape(features.shape[0], features.shape[1] * features.shape[2]).transpose()
         else:
             features2 = np.zeros(
                 (
@@ -594,9 +624,9 @@ class Model:
                 dtype=features.dtype
             )
             features2[
-                :,
-                self.window_size:features.shape[1] + self.window_size,
-                self.window_size:features.shape[2] + self.window_size
+            :,
+            self.window_size:features.shape[1] + self.window_size,
+            self.window_size:features.shape[2] + self.window_size
             ] = features
             features3 = np.zeros(
                 (
@@ -614,41 +644,33 @@ class Model:
                     features.shape[0],
                     self.window_size * 2 + 1,
                     self.window_size * 2 + 1,
-                    features.shape[1]*features.shape[2]
+                    features.shape[1] * features.shape[2]
                 )).transpose(3, 1, 2, 0)
             else:
                 features = features3.reshape((
-                    features.shape[0] * (self.window_size * 2 + 1)**2,
+                    features.shape[0] * (self.window_size * 2 + 1) ** 2,
                     features.shape[1] * features.shape[2]
                 )).transpose()
-        if self.normalize:
-            if self.is_conv:
-                features = self.normalizer.transform(
-                    features.reshape(
-                        features.shape[0] * features.shape[1] * features.shape[2],
-                        features.shape[-1]
-                    )
-                ).reshape(
-                    features.shape[0],
-                    features.shape[1],
-                    features.shape[2],
-                    features.shape[-1]
+        if parallelize:
+            cpu_count = multiprocessing.cpu_count()
+            with Pool(cpu_count) as pool:
+                results = pool.starmap(
+                    get_predictions,
+                    [(self, features[i::cpu_count]) for i in range(cpu_count)]
                 )
-            else:
-                features = self.normalizer.transform(features)
-            if self.pca_decomposition:
-                features = self.pca.transform(features)[:, :self.pca_components]
-        predictions = self.fitted_model.predict(features)
-        if len(predictions.shape) > 1:
-            predictions = predictions.argmax(axis=1)
+                predictions = np.zeros((features.shape[0]), dtype=np.uint8)
+                for i in range(cpu_count):
+                    predictions[i::cpu_count] = results[i]
+        else:
+            predictions = self.get_predictions(features)
         predictions = predictions.reshape(original_shape[0], original_shape[1])
         if isinstance(apply_cloud_mask, list):
             with rasterio.open(
-                os.path.join(
-                    workspace,
-                    "cloud_masks",
-                    f"{image.name.rsplit('_', 1)[0].replace('MSIL2A', 'MSIL1C')}.tif"
-                )
+                    os.path.join(
+                        workspace,
+                        "cloud_masks",
+                        f"{image.name.rsplit('_', 1)[0].replace('MSIL2A', 'MSIL1C')}.tif"
+                    )
             ) as mask:
                 if bbox is None:
                     masked, transform = rasterio.mask.mask(mask, [box(*channel.bounds)], crop=True)
@@ -784,7 +806,7 @@ class CadastralModel:
             for path in feature_list:
                 i += 1
                 if i % 100 == 0:
-                    print(i/len(feature_list))
+                    print(i / len(feature_list))
                     break
                 with rasterio.open(os.path.join(cadastral_dataset_path, path[0], path[1])) as image:
                     data = np.block([[[image.read(index)]] for index in image.indexes]
