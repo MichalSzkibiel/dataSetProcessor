@@ -292,6 +292,11 @@ def conv7(
     )
 
 
+def load_parcel_image(name):
+    with rasterio.open(os.path.join(workspace, name)) as image:
+        return np.block([[[image.read(index)]] for index in image.indexes]).transpose(1, 2, 0)
+
+
 def spp_conv(
         train_features,
         train_labels,
@@ -345,21 +350,29 @@ def spp_conv(
     epochs_count = 0
     start = datetime.now()
     cur_idx = 0
+    batch_size = 1
     while abs(loss - ploss) > loss_diff:
         ploss = loss
         for key in train_features_by_size:
-            for i in range(0, len(train_features_by_size[key]), 16):
-                with Pool() as pool:
-                    loaded_features = pool.starmap(load_image, [(el,) for el in train_features_by_size[key][i:i + 16]])
-                key = train_features[cur_idx][0]
-                model.fit(np.array(loaded_features), np.array(train_labels_by_size[key][i:i + 16]))
-            epochs_count += 1
+            for i in range(0, len(train_features_by_size[key]), batch_size):
+                """with Pool() as pool:
+                    loaded_features = pool.starmap(
+                        load_parcel_image,
+                        [(el,) for el in train_features_by_size[key][i:i + batch_size]]
+                    )"""
+                loaded_features = [load_parcel_image(train_features_by_size[key][i])]
+                model.fit(np.array(loaded_features), np.array(train_labels_by_size[key][i:i + batch_size]))
+                epochs_count += 1
         prediction = []
         answers = []
         for key in train_features_by_size:
-            for i in range(0, len(train_features_by_size[key]), 16):
-                with Pool() as pool:
-                    loaded_features = pool.starmap(load_image, [(el,) for el in train_features_by_size[key][i:i + 16]])
+            for i in range(0, len(train_features_by_size[key]), batch_size):
+                """with Pool() as pool:
+                    loaded_features = pool.starmap(
+                        load_parcel_image,
+                        [(el,) for el in train_features_by_size[key][i:i + batch_size]]
+                    )"""
+                loaded_features = [load_parcel_image(train_features_by_size[key][i])]
                 prediction += model.predict(np.array(loaded_features)).tolist()
             answers += train_labels_by_size[key].tolist()
         prediction = np.array(prediction)
@@ -368,9 +381,10 @@ def spp_conv(
         loss = np.sum(prediction == answers) / prediction.shape[0]
     predictions = []
     for path in test_features:
-        with rasterio.open(path) as image:
-            predictions += model.predict([np.block([[[image.read(index)]] for index in image.indexes])])
-    predictions = np.array(predictions).argmax(axis=1)
+        with rasterio.open(path[1]) as image:
+            data = np.block([[[image.read(index)]] for index in image.indexes]).transpose(1, 2, 0)
+            predictions += [model.predict(np.array([data]))]
+    predictions = np.array(predictions).argmax(axis=2)[:, 0]
     return model, predictions
 
 
@@ -795,7 +809,8 @@ class CadastralModel:
         feature_list = []
         for el in os.listdir(cadastral_dataset_path):
             for el2 in os.listdir(os.path.join(cadastral_dataset_path, el)):
-                feature_list.append([el, el2])
+                if el2[-4:] == ".tif":
+                    feature_list.append([el, el2])
         insert_param_to_table(table, 'dataset_name', dataset_name)
         insert_param_to_table(table, 'features_count', len(feature_list))
         with rasterio.open(os.path.join(cadastral_dataset_path, feature_list[0][0], feature_list[0][1])) as image:
@@ -848,77 +863,9 @@ class CadastralModel:
             test_features=test_features,
             table=table
         )
-        true_negatives = np.sum((predictions < 0.5) & (test_labels == 0))
-        false_negatives = np.sum((predictions < 0.5) & (test_labels == 1))
-        false_positives = np.sum((predictions >= 0.5) & (test_labels == 0))
-        true_positives = np.sum((predictions >= 0.5) & (test_labels == 1))
-
-        accuracy = (true_positives + true_negatives) / test_labels.shape[0]
-
-        try:
-            precision0 = true_negatives / (true_negatives + false_negatives)
-        except:
-            precision0 = "NaN"
-        try:
-            recall0 = true_negatives / (true_negatives + false_positives)
-        except:
-            recall0 = "NaN"
-        try:
-            precision1 = true_positives / (false_positives + true_positives)
-        except:
-            precision1 = "NaN"
-        try:
-            recall1 = true_positives / (false_negatives + true_positives)
-        except:
-            recall1 = "NaN"
-
-        try:
-            f10 = 2 / (1 / precision0 + 1 / recall0)
-        except:
-            f10 = "NaN"
-        try:
-            f11 = 2 / (1 / precision1 + 1 / recall1)
-        except:
-            f11 = "NaN"
-
-        try:
-            mean_f1 = (f10 + f11) / 2
-        except:
-            mean_f1 = "NaN"
-
-        doc.add_heading(language['confusion_matrix'], level=1)
-        table = doc.add_table(rows=5, cols=4)
-        header_cells = table.rows[0].cells
-        header_cells[0].text = language['test\\training']
-        header_cells[1].text = "0"
-        header_cells[2].text = "1"
-        header_cells[3].text = language['precision']
-
-        row_cells = table.rows[1].cells
-        row_cells[0].text = "0"
-        row_cells[1].text = str(true_negatives)
-        row_cells[2].text = str(false_negatives)
-        row_cells[3].text = percent_format(precision0)
-
-        row_cells = table.rows[2].cells
-        row_cells[0].text = "1"
-        row_cells[1].text = str(false_positives)
-        row_cells[2].text = str(true_positives)
-        row_cells[3].text = percent_format(precision1)
-
-        row_cells = table.rows[3].cells
-        row_cells[0].text = language['recall']
-        row_cells[1].text = percent_format(recall0)
-        row_cells[2].text = percent_format(recall1)
-        row_cells[3].text = f"{language['accuracy']}: {percent_format(accuracy)}"
-
-        row_cells = table.rows[4].cells
-        row_cells[0].text = language['f1']
-        row_cells[1].text = percent_format(f10)
-        row_cells[2].text = percent_format(f11)
-        row_cells[3].text = f"{language['f1_mean']}: {percent_format(mean_f1)}"
+        accuracy, kappa = confusion_matrix(test_labels, predictions, doc)
         doc.save(os.path.join(workspace, "reports", "learning", f"{report_name}.docx"))
-        return accuracy, mean_f1
+        return accuracy, kappa
 
 
 def load_model(name):

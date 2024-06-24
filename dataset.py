@@ -797,14 +797,14 @@ class RasterDataset:
         doc.save(os.path.join(workspace, "reports", "datasets", f"{self.dataset_name}.docx"))
 
 
-def process_edge_parcel(target, parcel, sheet, feature_path):
+def process_edge_parcel(target, j, parcel, sheet, feature_path):
     image = rasterio.open(target)
     parcel_image, parcel_transform = rasterio.mask.mask(
         image,
         [parcel.geometry.buffer(0).intersection(sheet.geometry)],
         crop=True
     )
-    key = parcel["ID_DZIALKI"].replace("/", "%")
+    key = str(j)
     parcel_meta = image.meta
     parcel_meta.update({"height": parcel_image.shape[1],
                         "width": parcel_image.shape[2],
@@ -812,19 +812,19 @@ def process_edge_parcel(target, parcel, sheet, feature_path):
     parcel_path = os.path.join(feature_path, "partial", key)
     if not os.path.exists(parcel_path):
         os.mkdir(parcel_path)
-    parcel_path = os.path.join(parcel_path, f"{sheet['godlo']}_{parcel['label']}.tif")
+    parcel_path = os.path.join(parcel_path, f"{sheet['godlo']}_{parcel['class']}.tif")
     with rasterio.open(parcel_path, "w", **parcel_meta) as dest:
         dest.write(parcel_image)
 
 
-def process_inside_parcel(target, parcel, sheet, feature_path, pyramid_base):
+def process_inside_parcel(target, j, parcel, sheet, feature_path, pyramid_base):
     image = rasterio.open(target)
     parcel_image, parcel_transform = rasterio.mask.mask(
         image,
         [parcel.geometry.buffer(0).intersection(sheet.geometry)],
         crop=True
     )
-    key = parcel["ID_DZIALKI"].replace("/", "%")
+    key = str(j)
     level, parcel_image = pyramid_fit(parcel_image, pyramid_base)
     parcel_meta = image.meta
     parcel_meta.update({"height": parcel_image.shape[1],
@@ -833,56 +833,28 @@ def process_inside_parcel(target, parcel, sheet, feature_path, pyramid_base):
     level_path = os.path.join(feature_path, str(level))
     if not os.path.exists(level_path):
         os.mkdir(level_path)
-    parcel_path = os.path.join(level_path, f"{key}_{parcel['label']}.tif")
+    parcel_path = os.path.join(level_path, f"{key}_{parcel['class']}.tif")
     with rasterio.open(parcel_path, "w", **parcel_meta) as dest:
         dest.write(parcel_image)
 
 
-def label_parcel(parcel_geometry, buildings):
-    for j, building in buildings.iterrows():
-        if parcel_geometry.intersects(building.geometry):
-            return 1
-    return 0
-
-
 def process_sheet(sheet, target, parcels, feature_path, pyramid_base):
     print(sheet['godlo'])
-
+    if not os.path.exists(target):
+        download_image(sheet['url_do_pob'], target)
     edge_parcels = parcels[parcels.intersects(sheet.geometry) & ~parcels.within(sheet.geometry)]
     inside_parcels = parcels[parcels.within(sheet.geometry)]
-    bbox = Bbox(
-        sheet.geometry.bounds[1],
-        sheet.geometry.bounds[0],
-        sheet.geometry.bounds[3],
-        sheet.geometry.bounds[2],
-        crs="EPSG:2180"
-    ).to_crs("EPSG:4326")
-    buildings = osm_data(bbox, tags={"building": ""}).to_crs(crs=2180)
-    print(buildings)
-    print("Start labeling")
-    with Pool() as pool:
-        results = pool.starmap(
-            label_parcel,
-            [(parcel.geometry, buildings) for i, parcel in edge_parcels.iterrows()]
-        )
-        edge_parcels['label'] = results
-        results = pool.starmap(
-            label_parcel,
-            [(parcel.geometry, buildings) for i, parcel in inside_parcels.iterrows()]
-        )
-        inside_parcels['label'] = results
-    print(edge_parcels['label'].sum(), len(edge_parcels))
-    print(inside_parcels['label'].sum(), len(inside_parcels))
-    print("End labeling")
+    print(edge_parcels['class'].sum(), len(edge_parcels))
+    print(inside_parcels['class'].sum(), len(inside_parcels))
     print("Extracting dataset")
     with Pool() as pool:
         pool.starmap(
             process_edge_parcel,
-            [(target, parcel, sheet, feature_path) for j, parcel in edge_parcels.iterrows()]
+            [(target, j, parcel, sheet, feature_path) for j, parcel in edge_parcels.iterrows()]
         )
         pool.starmap(
             process_inside_parcel,
-            [(target, parcel, sheet, feature_path, pyramid_base) for j, parcel in inside_parcels.iterrows()]
+            [(target, j, parcel, sheet, feature_path, pyramid_base) for j, parcel in inside_parcels.iterrows()]
         )
     print("Dataset extracted")
 
@@ -918,28 +890,27 @@ def pyramid_fit(data, pyramid_base):
 class CadastralDataset:
     def __init__(self, name, pyramid_base=150):
         sheets = gpd.read_file("C:/Users/trole/Documents/Łódź/arkusze2021Łódź.shp")
-        parcels = gpd.read_file("C:/Users/trole/Documents/Łódź/dzialki.shp")
-        self.features = []
-        self.labels = []
+        sheets = sheets[sheets['piksel'] == 0.05]
+        parcels = gpd.read_file("C:/Users/trole/Documents/Łódź/etykietyBezNisko.shp")
         self.name = name
-        sheet_threads = []
         self.feature_path = os.path.join(workspace, "parcels", name)
         self.pyramid_base = pyramid_base
-        os.mkdir(self.feature_path)
-        self.feature_path = os.path.join(self.feature_path, "unnormalized")
-        os.mkdir(self.feature_path)
-        os.mkdir(os.path.join(self.feature_path, "partial"))
+        if not os.path.exists(self.feature_path):
+            os.mkdir(self.feature_path)
+            self.feature_path = os.path.join(self.feature_path, "unnormalized")
+            os.mkdir(self.feature_path)
+            os.mkdir(os.path.join(self.feature_path, "partial"))
+        else:
+            self.feature_path = os.path.join(self.feature_path, "unnormalized")
         for i, sheet in sheets.iterrows():
-            target = f"temp/ortofoto/{sheet['godlo']}.tif"
-            print(target)
-            if not os.path.exists(target):
-                download_image(sheet['url_do_pob'], target)
-            t = Thread(target=process_sheet, args=(sheet, target, parcels, self.feature_path, self.pyramid_base))
-            t.start()
-            sheet_threads.append(t)
-            break
-        for t in sheet_threads:
-            t.join()
+            if parcels.intersects(sheet.geometry).any():
+                process_sheet(
+                    sheet,
+                    f"temp/ortofoto/{sheet['godlo']}.tif",
+                    parcels,
+                    self.feature_path,
+                    self.pyramid_base
+                )
         with Pool() as pool:
             pool.starmap(merge_partial_parcels, [
                 (
